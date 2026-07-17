@@ -12,11 +12,11 @@
 
 export const USE_MOCK = new URLSearchParams(location.search).has('mock');
 
-async function callApi({ prompt, rows, model, signal }) {
+async function callApi({ prompt, rows, model, temperature, thinkingBudget, signal }) {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ prompt, rows, model }),
+    body: JSON.stringify({ prompt, rows, model, temperature, thinkingBudget }),
     signal,
   });
   if (!res.ok) {

@@ -11,8 +11,10 @@ const SAVE_THROTTLE_MS = 1500;  // min gap between IndexedDB writes during a run
 const ROW_H = 26;               // fixed grid row height (px) — must match CSS
 const ROW_BUFFER = 8;           // extra rows rendered above/below the viewport
 
-const GEMINI_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
+const GEMINI_MODELS = ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
 const DEFAULT_MODEL = 'gemini-2.5-flash-lite'; // cheapest — default for new sessions
+const DEFAULT_TEMPERATURE = 0.1; // low — rewriting should be near-deterministic
+const DEFAULT_THINKING_BUDGET = 0; // 0 = thinking off (fast); ignored for pro models
 
 const appEl = document.getElementById('app');
 
@@ -237,6 +239,8 @@ function parseCurrent() {
   current.record.hasHeader = hasHeader;
   if (!current.record.model) current.record.model = DEFAULT_MODEL;
   if (!current.record.batchSize) current.record.batchSize = DEFAULT_BATCH;
+  if (current.record.temperature == null) current.record.temperature = DEFAULT_TEMPERATURE;
+  if (current.record.thinkingBudget == null) current.record.thinkingBudget = DEFAULT_THINKING_BUDGET;
   current.record.progress = {
     done: Object.keys(current.record.results).length,
     total: dataRows.length,
@@ -298,6 +302,10 @@ function renderEditor() {
             <select id="model">${modelOpts}</select></label>
           <label class="si-field">Batch size
             <input id="batch" type="number" min="1" max="200" value="${record.batchSize}" /></label>
+          <label class="si-field">Temperature
+            <input id="temp" type="number" min="0" max="2" step="0.1" value="${record.temperature ?? DEFAULT_TEMPERATURE}" /></label>
+          <label class="si-field">Thinking budget
+            <input id="thinking" type="number" min="0" step="128" value="${record.thinkingBudget ?? DEFAULT_THINKING_BUDGET}" title="Thinking tokens (0 = off). Ignored for pro models." /></label>
           <label class="si-field">Max FULL length
             <input id="max-full" type="number" min="0" placeholder="∞" value="${record.maxFull || ''}" /></label>
           <label class="si-field">Max SHORT length
@@ -366,6 +374,21 @@ function renderEditor() {
   document.getElementById('batch').addEventListener('change', async (e) => {
     current.record.batchSize = Math.max(1, parseInt(e.target.value, 10) || DEFAULT_BATCH);
     e.target.value = current.record.batchSize;
+    await db.putSession(current.record);
+  });
+  document.getElementById('temp').addEventListener('change', async (e) => {
+    let v = parseFloat(e.target.value);
+    if (!Number.isFinite(v)) v = DEFAULT_TEMPERATURE;
+    v = Math.min(2, Math.max(0, v));
+    current.record.temperature = v;
+    e.target.value = v;
+    await db.putSession(current.record);
+  });
+  document.getElementById('thinking').addEventListener('change', async (e) => {
+    let v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v) || v < 0) v = DEFAULT_THINKING_BUDGET;
+    current.record.thinkingBudget = v;
+    e.target.value = v;
     await db.putSession(current.record);
   });
   const onMaxChange = (field) => async (e) => {
@@ -626,7 +649,7 @@ function rollingRate() {
 // One chunk: row-id round-trip validation, exponential backoff + jitter, and
 // TARGETED partial retry (re-request only the still-missing row-ids). Returns
 // { byId, error } — error is the last failure message when incomplete.
-async function generateChunkWithRetry(prompt, rowsAll, model, signal) {
+async function generateChunkWithRetry(prompt, rowsAll, gen, signal) {
   const wanted = new Set(rowsAll.map((r) => r.row_id));
   const best = new Map();
   let pending = rowsAll;
@@ -635,7 +658,7 @@ async function generateChunkWithRetry(prompt, rowsAll, model, signal) {
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     await waitForCooldown(signal);
     try {
-      const { items } = await generateChunk({ prompt, rows: pending, model, signal });
+      const { items } = await generateChunk({ prompt, rows: pending, ...gen, signal });
       for (const it of items || []) {
         if (wanted.has(it.row_id) && !best.has(it.row_id)) best.set(it.row_id, it);
       }
@@ -712,7 +735,11 @@ async function runIndices(indices) {
   if (!indices.length) { alert('No rows to process.'); return; }
 
   const batch = Math.max(1, current.record.batchSize || DEFAULT_BATCH);
-  const model = current.record.model || DEFAULT_MODEL;
+  const gen = {
+    model: current.record.model || DEFAULT_MODEL,
+    temperature: current.record.temperature ?? DEFAULT_TEMPERATURE,
+    thinkingBudget: current.record.thinkingBudget ?? DEFAULT_THINKING_BUDGET,
+  };
   const maxFull = current.record.maxFull || 0;   // 0 = no limit
   const maxShort = current.record.maxShort || 0;
 
@@ -727,6 +754,9 @@ async function runIndices(indices) {
     startTime: Date.now(),
   };
   setRunning(true);
+  // Heartbeat: refresh the UI every second even when no chunk completes, so a slow
+  // first response (pro can take ~30s/batch) shows a live elapsed counter, not a freeze.
+  run.ticker = setInterval(updateRunUI, 1000);
   updateRunUI();
 
   const groups = [...chunk(indices, batch)];
@@ -736,7 +766,7 @@ async function runIndices(indices) {
     let byId = new Map();
     let error = null;
     try {
-      ({ byId, error } = await generateChunkWithRetry(promptText, rows, model, run.abort.signal));
+      ({ byId, error } = await generateChunkWithRetry(promptText, rows, gen, run.abort.signal));
     } catch (err) {
       if (err.name === 'AbortError') return;
       error = err.message;
@@ -783,6 +813,7 @@ async function runIndices(indices) {
     for (let i = 0; i < Math.min(run.concurrency, groups.length); i++) starters.push(worker());
     await Promise.all(starters);
   } finally {
+    clearInterval(run.ticker); // stop the heartbeat
     try { await db.putSession(current.record); } catch (err) { handleStorageError(err); }
     run = null;
     setRunning(false); // hides the progress bar
@@ -821,13 +852,20 @@ function renderRunUI() {
     const pct = run.total ? (run.done / run.total) * 100 : 0;
     if (bar) bar.style.width = pct.toFixed(1) + '%';
     const rate = rollingRate();
-    const remaining = rate > 0 ? (run.total - run.done) / rate : Infinity;
-    document.getElementById('eta').textContent = run.done >= run.total ? 'done' : fmtDuration(remaining);
+    const etaEl = document.getElementById('eta');
     const rateEl = document.getElementById('rate');
-    if (rateEl) {
-      rateEl.textContent = rate > 0 ? `${rate.toFixed(1)} rows/s` : '';
-      if (run.concurrency < CONCURRENCY) rateEl.textContent += ` · ${run.concurrency}× (throttled)`;
+    if (rate > 0) {
+      const remaining = (run.total - run.done) / rate;
+      if (etaEl) etaEl.textContent = run.done >= run.total ? 'done' : fmtDuration(remaining);
+      if (rateEl) rateEl.textContent = `${rate.toFixed(1)} rows/s`;
+    } else {
+      // No chunk has finished yet — slow first response (e.g. pro can take ~30s per
+      // batch). Show a live elapsed counter so the run doesn't look frozen.
+      const elapsed = Math.round((Date.now() - run.startTime) / 1000);
+      if (etaEl) etaEl.textContent = '…';
+      if (rateEl) rateEl.textContent = `working… ${elapsed}s`;
     }
+    if (rateEl && run.concurrency < CONCURRENCY) rateEl.textContent += ` · ${run.concurrency}× (throttled)`;
   }
   // When idle the progress bar is hidden (see setRunning), so nothing to update.
 }

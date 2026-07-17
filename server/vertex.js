@@ -11,11 +11,11 @@ import { GoogleGenAI, Type } from '@google/genai';
 // calls: the Gemini 2.5 models live ONLY on a single region (us-central1) and 404 on
 // the multi-region endpoints; the Gemini 3.x models live ONLY on the `us`/`eu`
 // multi-region endpoints and 404 on us-central1. So the location travels WITH the
-// model, and we keep one client per location. (gemini-2.5-pro is intentionally not
-// offered: it rejects thinkingBudget:0 with a 400.)
+// model, and we keep one client per location.
 const ALLOWED_MODELS = new Set([
   'gemini-2.5-flash-lite',
   'gemini-2.5-flash',
+  'gemini-2.5-pro',
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash',
 ]);
@@ -23,6 +23,10 @@ const ALLOWED_MODELS = new Set([
 // Models served from the `us`/`eu` multi-region endpoints (Gemini 3.x). Everything
 // else uses the single-region GCP_LOCATION.
 const MULTIREGION_MODELS = new Set(['gemini-3.1-flash-lite', 'gemini-3.5-flash']);
+
+// Models that reject thinkingBudget:0 with a 400 (the "pro" tier can't turn thinking
+// off). For these we simply omit thinkingConfig and let the model think.
+const NO_THINKING_OFF = new Set(['gemini-2.5-pro']);
 
 function locationFor(model) {
   return MULTIREGION_MODELS.has(model)
@@ -137,21 +141,37 @@ async function withBackoff(fn) {
   }
 }
 
-export async function generate({ prompt, rows, model }) {
+// Gemini accepts temperature in [0, 2]. Clamp and fall back to a low default when
+// the caller sends nothing usable.
+function resolveTemperature(t) {
+  return Number.isFinite(t) ? Math.min(2, Math.max(0, t)) : 0.1;
+}
+
+// thinkingBudget = thinking tokens the model may spend. 0 disables thinking (fast);
+// a positive value caps it. Non-negative integer; anything else falls back to 0.
+function resolveThinkingBudget(t) {
+  return Number.isFinite(t) && t >= 0 ? Math.floor(t) : 0;
+}
+
+export async function generate({ prompt, rows, model, temperature, thinkingBudget }) {
   const modelId = resolveModel(model);
   const ai = getClient(locationFor(modelId));
+  const config = {
+    temperature: resolveTemperature(temperature),
+    responseMimeType: 'application/json',
+    responseSchema: RESPONSE_SCHEMA,
+  };
+  // Apply the requested thinking budget — except on models that reject
+  // thinkingBudget:0 (see NO_THINKING_OFF): for those we send no thinkingConfig at
+  // all and let the model think, ignoring whatever budget was requested.
+  if (!NO_THINKING_OFF.has(modelId)) {
+    config.thinkingConfig = { thinkingBudget: resolveThinkingBudget(thinkingBudget) };
+  }
   const response = await withBackoff(() =>
     ai.models.generateContent({
       model: modelId,
       contents: [{ role: 'user', parts: [{ text: buildPrompt(prompt, rows) }] }],
-      config: {
-        temperature: 0.1,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        // Deterministic rewriting doesn't need the model's "thinking" phase, which
-        // dominates latency on 2.5-flash. Disable it for speed. (Set >0 to re-enable.)
-        thinkingConfig: { thinkingBudget: 0 },
-      },
+      config,
     })
   );
 

@@ -47,7 +47,7 @@ app.use((req, res, next) => {
 
 // --- Generate endpoint ---
 app.post('/api/generate', async (req, res) => {
-  const { prompt, rows, model } = req.body || {};
+  const { prompt, rows, model, temperature, thinkingBudget } = req.body || {};
   if (typeof prompt !== 'string' || !prompt.trim()) {
     return res.status(400).json({ error: 'prompt is required' });
   }
@@ -55,7 +55,7 @@ app.post('/api/generate', async (req, res) => {
     return res.status(400).json({ error: 'rows must be a non-empty array' });
   }
   try {
-    const { items } = await generate({ prompt, rows, model });
+    const { items } = await generate({ prompt, rows, model, temperature, thinkingBudget });
     res.json({ items });
   } catch (err) {
     console.error('generate failed:', err.message);

@@ -1,0 +1,21 @@
+{
+  "name": "ai-names-gen",
+  "version": "1.0.0",
+  "description": "Browser tool to bulk-rewrite product names into rules-conformant Full/Short variants, behind a tiny Vertex AI proxy.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "serve": "npx --yes serve public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@google/genai": "^2.12.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "private": true
+}

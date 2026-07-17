@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: ai-names-gen
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: GCP_PROJECT_ID
+        value: listex-ua-production   # not secret — pre-filled
+      - key: GCP_LOCATION
+        value: us-central1        # single-region: serves the Gemini 2.5 models
+      - key: GCP_LOCATION_V3
+        value: us                 # multi-region: serves the Gemini 3.x models
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: GCP_SA_BASE64
+        sync: false      # secret — set in dashboard
+      - key: BASIC_AUTH_USER
+        sync: false      # secret — set in dashboard
+      - key: BASIC_AUTH_PASS
+        sync: false      # secret — set in dashboard
